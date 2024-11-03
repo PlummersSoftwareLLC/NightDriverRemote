@@ -1,3 +1,7 @@
+// NightDriverRemote - Demo of ESPNOW commands being sent to a NightDriverStrip
+// using an ESP32-based remote control with an OLED display and a button.
+// Steps through the 7 available effects on the target device.
+
 #include <Arduino.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -24,6 +28,8 @@ constexpr std::array<const char*, 7> EFFECT_NAMES =
 };
 
 // Broadcast MAC allows control of all NightDriverStrip instances in range.
+// This allows front and back license plate NightDriverStrips to be controlled
+// at the same time.
 // For selective control, replace with the specific target device's MAC.
 // Format: {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}
 
@@ -38,7 +44,7 @@ enum class ESPNowCommand : uint8_t
     NextEffect = 1,
     PrevEffect,
     SetEffect,
-    INVALID = 99
+    INVALID = 255
 };
 
 // Network message format for ESPNOW communication.
@@ -67,11 +73,9 @@ private:
     uint8_t       size;       // Protocol versioning and message validation
     ESPNowCommand command;    // Operation to perform
     uint32_t      arg1;       // Command-specific parameter (e.g., effect index)
-} __attribute__((packed));
+} __attribute__((packed));    // Packed on both ends (send and receive) so they agree on the size
 
 // Main controller class implementing the remote functionality.
-// Uses RAII pattern and modern C++ practices for resource management.
-// Not copyable or moveable as it manages ESP32 hardware resources.
 
 class NightDriverRemote 
 {
@@ -123,7 +127,7 @@ private:
         // Display effect index
         Heltec.display->setFont(ArialMT_Plain_10);
         Heltec.display->setTextAlignment(TEXT_ALIGN_CENTER);
-        char indexStr[20];
+        char indexStr[30];
         snprintf(indexStr, sizeof(indexStr), "Effect: %d/%d", currentEffect + 1, EFFECT_NAMES.size());
         Heltec.display->drawString(64, 0, indexStr);
         
