@@ -8,7 +8,7 @@
 #include <WiFi.h>
 #include <array>
 #include "Bounce2.h"
-#include "heltec.h"  // Add Heltec library for OLED support
+#include "heltec.h"  // Heltec library for OLED support
 
 namespace 
 {
@@ -110,98 +110,6 @@ namespace
             }
         }
 
-     private:
-        // Initialize the OLED display
-        bool initializeDisplay() 
-        {
-            Heltec.begin(true /*DisplayEnable Enable*/, false /*LoRa Disable*/, true /*Serial Enable*/);
-            Heltec.display->setFont(ArialMT_Plain_16);  // Set a readable font size
-            updateDisplay();  // Show initial display
-            return true;
-        }
-
-        // Update the OLED display with current effect information
-
-        void updateDisplay() 
-        {
-            Heltec.display->clear();
-            
-            // Display effect index
-            Heltec.display->setFont(ArialMT_Plain_10);
-            Heltec.display->setTextAlignment(TEXT_ALIGN_CENTER);
-            char indexStr[30];
-            snprintf(indexStr, sizeof(indexStr), "Effect: %d/%d", currentEffect + 1, EFFECT_NAMES.size());
-            Heltec.display->drawString(64, 0, indexStr);
-            
-            // Display effect name
-            Heltec.display->setFont(ArialMT_Plain_16);
-            Heltec.display->setTextAlignment(TEXT_ALIGN_CENTER);
-            Heltec.display->drawString(64, 20, EFFECT_NAMES[currentEffect]);
-            
-            // Draw a progress bar
-            int progressWidth = (currentEffect * 128) / (EFFECT_NAMES.size() - 1);
-            Heltec.display->drawProgressBar(0, 50, 128, 10, (progressWidth * 100) / 128);
-            
-            Heltec.display->display();
-        }
-
-        // Configures button with internal pull-up and debouncing
-
-        bool initializeButton() 
-        {
-            button.attach(0, INPUT_PULLUP);
-            button.interval(1);
-            button.setPressedState(LOW);
-            return true;
-        }
-
-        // Sets up WiFi in station mode without connecting to any network
-
-        bool initializeWiFi() 
-        {
-            WiFi.mode(WIFI_STA);
-            return true;
-        }
-
-        // ESPNOW transmission status callback
-        // Used for debugging and could be extended for retry logic
-        static void onSendCallback(const uint8_t* macAddr, esp_now_send_status_t status) 
-        {
-            Serial.print(F("Send status: "));
-            Serial.println(status == ESP_NOW_SEND_SUCCESS ? F("Success") : F("Fail"));
-        }
-
-        // Initializes ESPNOW protocol and registers callback
-        
-        bool initializeESPNow() 
-        {
-            if (esp_now_init() != ESP_OK) {
-                Serial.println(F("Error initializing ESP-NOW"));
-                return false;
-            }
-
-            esp_now_register_send_cb(onSendCallback);
-            return true;
-        }
-
-        // Registers the target device(s) as ESPNOW peer(s)
-        
-        bool addPeer() 
-        {
-            esp_now_peer_info_t peerInfo = {};
-            std::copy(RECEIVER_MAC.begin(), RECEIVER_MAC.end(), peerInfo.peer_addr);
-            peerInfo.channel = 0;        // Auto channel selection
-            peerInfo.encrypt = false;    // No encryption for broadcast support
-            peerInfo.ifidx = WIFI_IF_STA;
-
-            if (esp_now_add_peer(&peerInfo) != ESP_OK) 
-            {
-                Serial.println(F("Failed to add peer"));
-                return false;
-            }
-            return true;
-        }
-
         // setBrightness
         //
         // Sends brightness change command to target device(s)
@@ -248,6 +156,103 @@ namespace
             return false;
         }
 
+     private:
+        // Initialize the OLED display
+        bool initializeDisplay() 
+        {
+            Heltec.begin(true /*DisplayEnable Enable*/, false /*LoRa Disable*/, true /*Serial Enable*/);
+            Heltec.display->setFont(ArialMT_Plain_16);  // Set a readable font size
+            updateDisplay();  // Show initial display
+            return true;
+        }
+
+        // Update the OLED display with current effect information
+
+        void updateDisplay() 
+        {
+            // This code assumes the default screen size of 128x64 pixels
+
+            assert(Heltec.display->width() == 128 && Heltec.display->height() == 64);
+
+            Heltec.display->clear();
+            
+            // Display effect index
+            Heltec.display->setFont(ArialMT_Plain_10);
+            Heltec.display->setTextAlignment(TEXT_ALIGN_CENTER);
+
+            char indexStr[30];
+            snprintf(indexStr, sizeof(indexStr), "Effect: %d/%d", currentEffect + 1, EFFECT_NAMES.size());
+            Heltec.display->drawString(64, 0, indexStr);
+            
+            // Display effect name
+            Heltec.display->setFont(ArialMT_Plain_16);
+            Heltec.display->setTextAlignment(TEXT_ALIGN_CENTER);
+            Heltec.display->drawString(64, 20, EFFECT_NAMES[currentEffect]);
+            
+            // Draw a progress bar
+            int progressWidth = (currentEffect * 128) / (EFFECT_NAMES.size() - 1);
+            Heltec.display->drawProgressBar(0, 50, 128, 10, (progressWidth * 100) / 128);
+            
+            Heltec.display->display();
+        }
+
+        // Configures button with internal pull-up and debouncing
+
+        bool initializeButton() 
+        {
+            button.attach(0, INPUT_PULLUP);
+            button.interval(1);
+            button.setPressedState(LOW);
+            return true;
+        }
+
+        // Sets up WiFi in station mode without connecting to any network
+
+        bool initializeWiFi() 
+        {
+            WiFi.mode(WIFI_STA);
+            return true;
+        }
+
+        // ESPNOW transmission status callback
+        // Used for debugging and could be extended for retry logic
+        static void onSendCallback(const uint8_t* macAddr, esp_now_send_status_t status) 
+        {
+            Serial.print(F("Send status: "));
+            Serial.println(status == ESP_NOW_SEND_SUCCESS ? F("Success") : F("Fail"));
+        }
+
+        // Initializes ESPNOW protocol and registers callback
+
+        bool initializeESPNow() 
+        {
+            if (esp_now_init() != ESP_OK) {
+                Serial.println(F("Error initializing ESP-NOW"));
+                return false;
+            }
+
+            esp_now_register_send_cb(onSendCallback);
+            return true;
+        }
+
+        // Registers the target device(s) as ESPNOW peer(s)
+        
+        bool addPeer() 
+        {
+            esp_now_peer_info_t peerInfo = {};
+            std::copy(RECEIVER_MAC.begin(), RECEIVER_MAC.end(), peerInfo.peer_addr);
+            peerInfo.channel = 0;        // Auto channel selection
+            peerInfo.encrypt = false;    // No encryption for broadcast support
+            peerInfo.ifidx = WIFI_IF_STA;
+
+            if (esp_now_add_peer(&peerInfo) != ESP_OK) 
+            {
+                Serial.println(F("Failed to add peer"));
+                return false;
+            }
+            return true;
+        }
+
         Bounce2::Button button;      // Hardware button with debouncing
         uint32_t currentEffect = 0;  // Current effect index in EFFECT_NAMES array
     };
@@ -262,6 +267,7 @@ void setup()
     {
         Serial.println(F("Failed to initialize NightDriverRemote"));
     }
+    remote.setEffect(0);  // Start with the first effect
 }
 
 void loop() 
