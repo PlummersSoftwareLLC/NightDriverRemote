@@ -1,26 +1,18 @@
-// NightDriverRemote
-//
-// An ESPNOW remote control for the NightDriver LED controller.  Sends ESPNOW messages to the NightDriverStrip
-// instance identified by the receiverMAC address.  The remote has a single button that cycles through the
-// available effects on the NightDriverStrip.  Currently, the effects are defined in a table that is assumed
-// to match the PLATECOVER project in the NightDriverStrip repository.
-
 #include <Arduino.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
 #include <array>
-#include "Bounce2.h"                            // For Bounce button class
+#include "Bounce2.h"
+#include "heltec.h"  // Add Heltec library for OLED support
 
-using namespace std;
+namespace {
 
-// Define the button - connected to GPIO0 on the Heltec
+// Effect names that correspond to patterns available on the target NightDriverStrip.
+// These must be kept in sync with the target device's effect list, as indices are used
+// to trigger specific effects.
 
-Bounce2::Button Button1;
-
-// Define the effect names - these must match the effect names in the NightDriverStrip project
-
-static const array<string, 7> effectNames = 
+constexpr std::array<const char*, 7> EFFECT_NAMES = 
 {
     "Solid White",
     "Solid Red",
@@ -31,119 +23,217 @@ static const array<string, 7> effectNames =
     "Off"
 };
 
-// Define the MAC address of the receiver - We'll use the broadcast ID, but could be any MAC
-// address on a NightDriverStrip that is listening for ESPNOW messages.
+// Broadcast MAC allows control of all NightDriverStrip instances in range.
+// For selective control, replace with the specific target device's MAC.
+// Format: {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}
 
-uint8_t receiverMAC[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};  // Replace with the receiver's MAC address
+constexpr std::array<uint8_t, 6> RECEIVER_MAC = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-// The commands that can be sent to the NightDriverStrip
+// Command set for ESPNOW protocol. Values must match the receiver's expectations.
+// Starting at 1 allows detection of uninitialized/corrupted commands.
+// INVALID provides error detection in network protocol.
 
-typedef enum
+enum class ESPNowCommand : uint8_t 
 {
-    ESPNOW_NEXTEFFECT,
-    ESPNOW_PREVEFFECT,
-    ESPNOW_SETEFFECT
-} ESPNOW_COMMAND;
+    NextEffect = 1,
+    PrevEffect,
+    SetEffect,
+    INVALID = 99
+};
 
-// The message structure; the message is a single byte command followed by a 32-bit argument and
-// this structure must match the one in network.cpp of the NightDriverStrip project it is controlling.
+// Network message format for ESPNOW communication.
+// Packed to ensure consistent wire format between different compilers/platforms.
+// Includes size field for protocol versioning and validation.
 
-typedef struct Message 
+class Message 
 {
-    byte            cbSize;
-    ESPNOW_COMMAND  command;
-    uint32_t        arg1;
-} Message;
-
-Message message;
-
-// Report the success or failure of the message send
-
-void onSend(const uint8_t *macAddr, esp_now_send_status_t status) 
-{
-    Serial.print("Message send status: ");
-    Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Success" : "Fail");
-}
-
-// Set up the ESP32 and the button and add the ESPNOW peer
-
-void setup() 
-{
-    Serial.begin(115200);
-
-    Button1.attach(0, INPUT_PULLUP);
-    Button1.interval(1);
-    Button1.setPressedState(LOW);
-
-    // Initialize WiFi in station mode (does not connect to any network)
-    WiFi.mode(WIFI_STA);
-
-    // Initialize ESP-NOW
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("Error initializing ESP-NOW");
-        return;
-    }
-
-    // Register send callback function
-    esp_now_register_send_cb(onSend);
-
-    // Configure peer information
-    esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, receiverMAC, 6);
-    peerInfo.channel = 0;  
-    peerInfo.encrypt = false;
-    peerInfo.ifidx = WIFI_IF_STA;  // Set interface to station mode
-
-    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-        Serial.println("Failed to add peer");
-        return;
-    }
-}
-
-// Set the effect on the target NightDriverStrip instance via EESPNOW
-
-bool SetEffect(uint32_t effect)
-{
-    if (effect >= effectNames.size())
+public:
+    constexpr Message(ESPNowCommand cmd, uint32_t argument) : size(sizeof(Message)), command(cmd), arg1(argument) 
     {
+    }
+
+    // Provides raw byte access for network transmission while maintaining type safety
+    const uint8_t* data() const 
+    {
+        return reinterpret_cast<const uint8_t*>(this);
+    }
+
+    constexpr size_t byte_size() const 
+    {
+        return sizeof(Message);
+    }
+
+private:
+    uint8_t       size;       // Protocol versioning and message validation
+    ESPNowCommand command;    // Operation to perform
+    uint32_t      arg1;       // Command-specific parameter (e.g., effect index)
+} __attribute__((packed));
+
+// Main controller class implementing the remote functionality.
+// Uses RAII pattern and modern C++ practices for resource management.
+// Not copyable or moveable as it manages ESP32 hardware resources.
+
+class NightDriverRemote 
+{
+public:
+    NightDriverRemote() = default;
+    ~NightDriverRemote() = default;
+
+    // Prevent copying and moving as this class manages hardware resources
+    NightDriverRemote(const NightDriverRemote&) = delete;
+    NightDriverRemote& operator=(const NightDriverRemote&) = delete;
+    NightDriverRemote(NightDriverRemote&&) = delete;
+    NightDriverRemote& operator=(NightDriverRemote&&) = delete;
+
+    // Initializes all hardware in the correct sequence.
+    // Returns false if any stage fails, preventing partial initialization.
+    bool initialize() 
+    {
+        return initializeDisplay() && initializeButton() && initializeWiFi() && initializeESPNow() && addPeer();
+    }
+
+    // Main update loop - polls button and sends commands when pressed.
+    // Cycles through effects in reverse order due to physical button placement.
+    void update() 
+    {
+        button.update();
+        if (button.pressed()) 
+        {
+            currentEffect = (currentEffect + 1) % EFFECT_NAMES.size();
+            setEffect(currentEffect);
+            updateDisplay();  // Update display when effect changes
+        }
+    }
+
+private:
+    // Initialize the OLED display
+    bool initializeDisplay() 
+    {
+        Heltec.begin(true /*DisplayEnable Enable*/, false /*LoRa Disable*/, true /*Serial Enable*/);
+        Heltec.display->setFont(ArialMT_Plain_16);  // Set a readable font size
+        updateDisplay();  // Show initial display
+        return true;
+    }
+
+    // Update the OLED display with current effect information
+    void updateDisplay() 
+    {
+        Heltec.display->clear();
+        
+        // Display effect index
+        Heltec.display->setFont(ArialMT_Plain_10);
+        Heltec.display->setTextAlignment(TEXT_ALIGN_CENTER);
+        char indexStr[20];
+        snprintf(indexStr, sizeof(indexStr), "Effect: %d/%d", currentEffect + 1, EFFECT_NAMES.size());
+        Heltec.display->drawString(64, 0, indexStr);
+        
+        // Display effect name
+        Heltec.display->setFont(ArialMT_Plain_16);
+        Heltec.display->setTextAlignment(TEXT_ALIGN_CENTER);
+        Heltec.display->drawString(64, 20, EFFECT_NAMES[currentEffect]);
+        
+        // Draw a progress bar
+        int progressWidth = (currentEffect * 128) / (EFFECT_NAMES.size() - 1);
+        Heltec.display->drawProgressBar(0, 50, 128, 10, (progressWidth * 100) / 128);
+        
+        Heltec.display->display();
+    }
+
+    // Configures button with internal pull-up and debouncing
+    bool initializeButton() 
+    {
+        button.attach(0, INPUT_PULLUP);
+        button.interval(1);
+        button.setPressedState(LOW);
+        return true;
+    }
+
+    // Sets up WiFi in station mode without connecting to any network
+    bool initializeWiFi() 
+    {
+        WiFi.mode(WIFI_STA);
+        return true;
+    }
+
+    // ESPNOW transmission status callback
+    // Used for debugging and could be extended for retry logic
+    static void onSendCallback(const uint8_t* macAddr, esp_now_send_status_t status) 
+    {
+        Serial.print(F("Send status: "));
+        Serial.println(status == ESP_NOW_SEND_SUCCESS ? F("Success") : F("Fail"));
+    }
+
+    // Initializes ESPNOW protocol and registers callback
+    bool initializeESPNow() 
+    {
+        if (esp_now_init() != ESP_OK) {
+            Serial.println(F("Error initializing ESP-NOW"));
+            return false;
+        }
+
+        esp_now_register_send_cb(onSendCallback);
+        return true;
+    }
+
+    // Registers the target device(s) as ESPNOW peer(s)
+    bool addPeer() 
+    {
+        esp_now_peer_info_t peerInfo = {};
+        std::copy(RECEIVER_MAC.begin(), RECEIVER_MAC.end(), peerInfo.peer_addr);
+        peerInfo.channel = 0;        // Auto channel selection
+        peerInfo.encrypt = false;    // No encryption for broadcast support
+        peerInfo.ifidx = WIFI_IF_STA;
+
+        if (esp_now_add_peer(&peerInfo) != ESP_OK) 
+        {
+            Serial.println(F("Failed to add peer"));
+            return false;
+        }
+        return true;
+    }
+
+    // Sends effect change command to target device(s)
+    // Returns false if effect index is invalid or transmission fails
+    bool setEffect(uint32_t effect) 
+    {
+        if (effect >= EFFECT_NAMES.size()) 
+        {
+            return false;
+        }
+
+        Message msg{ESPNowCommand::SetEffect, effect};
+        auto result = esp_now_send(RECEIVER_MAC.data(), 
+                                 msg.data(), 
+                                 msg.byte_size());
+
+        if (result == ESP_OK) {
+            Serial.print(F("Set effect to: "));
+            Serial.println(EFFECT_NAMES[effect]);
+            return true;
+        }
+
+        Serial.println(F("Error sending message"));
         return false;
     }
 
-    message.cbSize = sizeof(message);
-    message.command = ESPNOW_SETEFFECT;
-    message.arg1    = effect;
+    Bounce2::Button button;      // Hardware button with debouncing
+    uint32_t currentEffect = 0;  // Current effect index in EFFECT_NAMES array
+};
 
-    esp_err_t result = esp_now_send(receiverMAC, (uint8_t *) &message, sizeof(message));
-    
-    if (result == ESP_OK) {
-        Serial.println("Message sent successfully");
-    } else {
-        Serial.println("Error sending message");
+} // anonymous namespace
+
+NightDriverRemote remote;
+
+void setup() 
+{
+    if (!remote.initialize()) 
+    {
+        Serial.println(F("Failed to initialize NightDriverRemote"));
     }
-
-    Serial.print("Setting effect to: ");
-    Serial.println(effectNames[effect].c_str());
-
-    return true;
 }
-
-// Main loop - cycle through the effects on the NightDriverStrip as the button is pressed
 
 void loop() 
 {
-    static uint32_t currentEffect = 0;
-    SetEffect(currentEffect);
-
-    do
-    {
-        Button1.update();
-        if (Button1.pressed())
-        {
-            currentEffect++;
-            if (currentEffect >= effectNames.size())
-                currentEffect = 0;
-            SetEffect(currentEffect);
-        }
-        delay(10);
-    } while (true);
+    remote.update();
+    delay(10);  // Cooperative multitasking delay
 }
