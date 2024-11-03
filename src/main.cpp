@@ -16,16 +16,25 @@ namespace
     // These must be kept in sync with the target device's effect list, as indices are used
     // to trigger specific effects.
 
-    constexpr std::array<const char*, 7> EFFECT_NAMES = 
+    struct LightEffect 
     {
-        "Solid White",
-        "Solid Red",
-        "Solid Amber",
-        "Fire Effect",
-        "Rainbow Fill",
-        "Color Meteors",
-        "Off"
+        const char* name;
+        uint32_t    index;
+        uint8_t brightness;
     };
+
+    constexpr std::array<LightEffect, 9> EFFECTS = 
+    {{
+        {"Bright White",   0, 255},    // Full brightness for white
+        {"Dim White",      0,  16},    // Full brightness for white
+        {"Bright Red",     1, 255},      // Slightly dimmer for red to prevent eye strain
+        {"Dim Red",        1,  32},      // Slightly dimmer for red to prevent eye strain
+        {"Solid Amber",    2, 255},    // Medium-high brightness for amber
+        {"Fire Effect",    3, 255},    // Medium brightness for dynamic fire effect
+        {"Rainbow Fill",   4, 255},   // Medium-high brightness for rainbow
+        {"Color Meteors",  5, 255},  // Bright enough to see meteor trails
+        {"Off",            6, 0}              // No brightness when off
+    }};
 
     // Broadcast MAC allows control of all NightDriverStrip instances in range.
     // This allows front and back license plate NightDriverStrips to be controlled
@@ -104,8 +113,9 @@ namespace
             button.update();
             if (button.pressed()) 
             {
-                currentEffect = (currentEffect + 1) % EFFECT_NAMES.size();
+                currentEffect = (currentEffect + 1) % EFFECTS.size();
                 setEffect(currentEffect);
+                setBrightness(EFFECTS[currentEffect].brightness);
                 updateDisplay();  // Update display when effect changes
             }
         }
@@ -127,7 +137,7 @@ namespace
                 return true;
             }
 
-            Serial.println(F("Error sending message"));
+            Serial.println(F("Error sending brightness message"));
             return false;
         }
 
@@ -136,23 +146,24 @@ namespace
 
         bool setEffect(uint32_t effect) 
         {
-            if (effect >= EFFECT_NAMES.size()) 
+            if (effect >= EFFECTS.size()) 
             {
                 return false;
             }
 
-            Message msg{ESPNowCommand::SetEffect, effect};
+            Message msg{ESPNowCommand::SetEffect, EFFECTS[effect].index};
             auto result = esp_now_send(RECEIVER_MAC.data(), 
                                     msg.data(), 
                                     msg.byte_size());
 
-            if (result == ESP_OK) {
+            if (result == ESP_OK) 
+            {
                 Serial.print(F("Set effect to: "));
-                Serial.println(EFFECT_NAMES[effect]);
+                Serial.println(EFFECTS[effect].name);
                 return true;
             }
 
-            Serial.println(F("Error sending message"));
+            Serial.println(F("Error sending setEffect message"));
             return false;
         }
 
@@ -181,16 +192,16 @@ namespace
             Heltec.display->setTextAlignment(TEXT_ALIGN_CENTER);
 
             char indexStr[30];
-            snprintf(indexStr, sizeof(indexStr), "Effect: %d/%d", currentEffect + 1, EFFECT_NAMES.size());
+            snprintf(indexStr, sizeof(indexStr), "Effect: %d/%d", currentEffect + 1, EFFECTS.size());
             Heltec.display->drawString(64, 0, indexStr);
             
             // Display effect name
             Heltec.display->setFont(ArialMT_Plain_16);
             Heltec.display->setTextAlignment(TEXT_ALIGN_CENTER);
-            Heltec.display->drawString(64, 20, EFFECT_NAMES[currentEffect]);
+            Heltec.display->drawString(64, 20, EFFECTS[currentEffect].name);
             
             // Draw a progress bar
-            int progressWidth = (currentEffect * 128) / (EFFECT_NAMES.size() - 1);
+            int progressWidth = (currentEffect * 128) / (EFFECTS.size() - 1);
             Heltec.display->drawProgressBar(0, 50, 128, 10, (progressWidth * 100) / 128);
             
             Heltec.display->display();
